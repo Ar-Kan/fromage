@@ -1,0 +1,9 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.agents$
+^\.idea$
+^temp$
+^scripts$
+^results$
+^fromage[.]Rcheck$
+^fromage_.*[.]tar[.]gz$
