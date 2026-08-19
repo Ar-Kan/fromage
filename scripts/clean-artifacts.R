@@ -1,9 +1,11 @@
 #!/usr/bin/env Rscript
+# removes only the generated check, archive, and example artifacts listed in that script
 
 paths <- c(
   "fromage.Rcheck",
   Sys.glob("fromage_*.tar.gz"),
-  file.path("results", "power-plot.png")
+  file.path("results", "single-series-example.png"),
+  file.path("results", "single-series-example.rds")
 )
 
 paths <- paths[file.exists(paths)]
