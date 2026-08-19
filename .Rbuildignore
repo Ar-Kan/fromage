@@ -5,5 +5,6 @@
 ^temp$
 ^scripts$
 ^results$
+^CONTRIBUTING[.]md$
 ^fromage[.]Rcheck$
 ^fromage_.*[.]tar[.]gz$
