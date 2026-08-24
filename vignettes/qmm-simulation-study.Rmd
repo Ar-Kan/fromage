@@ -1,0 +1,328 @@
+---
+title: "Reproducing the Original QMM Simulation Study"
+output: rmarkdown::html_vignette
+bibliography: references.bib
+link-citations: true
+vignette: >
+  %\VignetteIndexEntry{Reproducing the Original QMM Simulation Study}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+This vignette rewrites the QMM part of the experiment in the original
+`mmq_chart.Rmd` file using the public `fromage` API. It is a simulation study,
+not the workflow required for monitoring one observed series. For that common
+use case, start with `vignette("qmm-chart", package = "fromage")`.
+
+The original notebook also compared QMM with a residual rule fitted by
+`forecast::auto.arima()`. That rule is a separate benchmark and is not part of
+the QMM method, so it is not reproduced here.
+
+## What the experiment estimates
+
+For one Phase II horizon (L), a Monte Carlo replicate performs these steps:
+
+1. Simulate 100 Phase I observations from an ARMA(1,1) process.
+2. Continue the same process for Phase II, possibly with changed coefficients.
+3. Fit and weight the QMM candidate models using Phase I only.
+4. Calibrate the pointwise upper control limit for horizon (L).
+5. Form a length-100 coupled window with the last (100-L) Phase I
+   observations and the first (L) Phase II observations.
+6. Record whether its QMM statistic exceeds the limit.
+
+When the Phase II coefficients equal the Phase I coefficients, the signal
+proportion estimates the **pointwise false-alarm probability** at that horizon.
+When the coefficients change, it estimates the **detection probability**, or
+the power against that specified alternative at that horizon. These labels
+should not be interchanged.
+
+The intervals below are Wilson binomial-proportion intervals [@wilson1927].
+They describe Monte Carlo uncertainty in the estimated signal proportion; they
+are not QMM control limits.
+
+## Experiment settings from the notebook
+
+```{r settings}
+library(fromage)
+
+horizons <- c(1, 5, 15, 25, 50, 99)
+
+phase1_coefficients <- c(ar1 = 0.4, ma1 = 0.3)
+phase2_scenarios <- list(
+  unchanged = c(ar1 = 0.4, ma1 = 0.3),
+  moderate_increase = c(ar1 = 0.6, ma1 = 0.5),
+  large_increase = c(ar1 = 0.8, ma1 = 0.7),
+  decrease = c(ar1 = 0.2, ma1 = 0.1),
+  sign_reversal = c(ar1 = -0.4, ma1 = -0.3)
+)
+
+candidates <- arma_candidates(max_p = 2, max_q = 2)
+```
+
+`arma_candidates(2, 2)` produces the eight ARMA orders used by the notebook:
+all combinations from 0 through 2 except ARMA(0,0).
+
+## Small helpers used only by the example
+
+The following interval function implements the Wilson score formula. It is an
+example helper, not part of the package API.
+
+```{r wilson-helper}
+wilson_interval <- function(successes, trials, confidence_level = 0.95) {
+  z <- stats::qnorm(1 - (1 - confidence_level) / 2)
+  estimate <- successes / trials
+  denominator <- 1 + z^2 / trials
+  center <- (estimate + z^2 / (2 * trials)) / denominator
+  half_width <- z / denominator * sqrt(
+    estimate * (1 - estimate) / trials + z^2 / (4 * trials^2)
+  )
+
+  c(
+    estimate = estimate,
+    lower = max(0, center - half_width),
+    upper = min(1, center + half_width)
+  )
+}
+```
+
+At one horizon, the package need only calibrate that horizon. We therefore
+calculate the observed coupled-window statistic directly with
+`qmm_statistic()` instead of asking `monitor_qmm()` to evaluate every earlier
+horizon as well.
+
+```{r scenario-helper}
+estimate_qmm_signals <- function(phase1_coefficients,
+                                 phase2_coefficients,
+                                 horizons,
+                                 reference_length,
+                                 monte_carlo_replicates,
+                                 bootstrap_replicates,
+                                 candidates,
+                                 portmanteau_lag = 10,
+                                 confidence_level = 0.95,
+                                 burn_in = 1000) {
+  rows <- vector("list", length(horizons))
+
+  for (horizon_index in seq_along(horizons)) {
+    horizon <- horizons[horizon_index]
+    detected <- logical(monte_carlo_replicates)
+
+    for (replicate in seq_len(monte_carlo_replicates)) {
+      simulated <- simulate_arma_change(
+        reference_length = reference_length,
+        monitoring_length = reference_length,
+        reference_coefficients = phase1_coefficients,
+        monitoring_coefficients = phase2_coefficients,
+        order = c(1, 1),
+        burn_in = burn_in
+      )
+
+      fit <- fit_qmm(
+        simulated$reference,
+        candidates = candidates,
+        criterion = "AICc"
+      )
+
+      calibration <- calibrate_qmm(
+        fit,
+        horizons = horizon,
+        bootstrap_replicates = bootstrap_replicates,
+        confidence_level = confidence_level,
+        portmanteau_lag = portmanteau_lag,
+        keep_bootstrap = FALSE
+      )
+
+      window <- if (horizon < reference_length) {
+        c(
+          simulated$reference[(horizon + 1):reference_length],
+          simulated$monitoring[seq_len(horizon)]
+        )
+      } else {
+        simulated$monitoring[seq_len(horizon)]
+      }
+
+      observed <- qmm_statistic(
+        fit,
+        window,
+        portmanteau_lag = portmanteau_lag
+      )
+      detected[replicate] <- observed > calibration$limits$control_limit
+    }
+
+    interval <- wilson_interval(
+      successes = sum(detected),
+      trials = monte_carlo_replicates
+    )
+    rows[[horizon_index]] <- data.frame(
+      horizon = horizon,
+      signals = sum(detected),
+      replicates = monte_carlo_replicates,
+      estimate = unname(interval["estimate"]),
+      lower = unname(interval["lower"]),
+      upper = unname(interval["upper"])
+    )
+  }
+
+  do.call(rbind, rows)
+}
+```
+
+The outer helper repeats that calculation for every Phase II scenario. The
+unchanged scenario is labelled separately from the alternatives.
+
+```{r study-helper}
+run_qmm_simulation_study <- function(phase1_coefficients,
+                                     phase2_scenarios,
+                                     horizons,
+                                     reference_length = 100,
+                                     monte_carlo_replicates = 1000,
+                                     bootstrap_replicates = 500,
+                                     candidates = arma_candidates(2, 2),
+                                     portmanteau_lag = 10,
+                                     confidence_level = 0.95,
+                                     burn_in = 1000,
+                                     seed = 2026) {
+  set.seed(seed)
+  scenario_rows <- vector("list", length(phase2_scenarios))
+
+  for (scenario_index in seq_along(phase2_scenarios)) {
+    coefficients <- phase2_scenarios[[scenario_index]]
+    scenario_result <- estimate_qmm_signals(
+      phase1_coefficients = phase1_coefficients,
+      phase2_coefficients = coefficients,
+      horizons = horizons,
+      reference_length = reference_length,
+      monte_carlo_replicates = monte_carlo_replicates,
+      bootstrap_replicates = bootstrap_replicates,
+      candidates = candidates,
+      portmanteau_lag = portmanteau_lag,
+      confidence_level = confidence_level,
+      burn_in = burn_in
+    )
+
+    scenario_result$scenario <- names(phase2_scenarios)[scenario_index]
+    unchanged <- isTRUE(all.equal(
+      unname(coefficients),
+      unname(phase1_coefficients)
+    ))
+    scenario_result$quantity <- if (unchanged) {
+      "Pointwise false-alarm probability"
+    } else {
+      "Detection probability"
+    }
+    scenario_rows[[scenario_index]] <- scenario_result
+  }
+
+  result <- do.call(rbind, scenario_rows)
+  rownames(result) <- NULL
+  result[, c(
+    "scenario", "quantity", "horizon", "signals", "replicates",
+    "estimate", "lower", "upper"
+  )]
+}
+```
+
+## Fast executable example
+
+The following call is deliberately tiny. Its purpose is to verify the complete
+workflow quickly, not to provide stable Monte Carlo estimates.
+
+```{r fast-study}
+fast_results <- run_qmm_simulation_study(
+  phase1_coefficients = phase1_coefficients,
+  phase2_scenarios = phase2_scenarios[c("unchanged", "moderate_increase")],
+  horizons = c(1, 5),
+  reference_length = 40,
+  monte_carlo_replicates = 2,
+  bootstrap_replicates = 10,
+  candidates = arma_candidates(1, 1),
+  portmanteau_lag = 5,
+  burn_in = 100,
+  seed = 2026
+)
+
+fast_results
+```
+
+With only two Monte Carlo replicates and ten bootstrap replicates, these
+numbers must not be interpreted as estimates of operating performance.
+
+## Full notebook design
+
+This call uses the values from `mmq_chart.Rmd`. It performs 30 combinations of
+scenario and horizon, 1,000 Monte Carlo replicates per combination, and 500
+bootstrap replicates within each Monte Carlo replicate. It is intentionally not
+run while building the package because it is computationally expensive.
+
+```{r full-study, eval=FALSE}
+full_results <- run_qmm_simulation_study(
+  phase1_coefficients = phase1_coefficients,
+  phase2_scenarios = phase2_scenarios,
+  horizons = horizons,
+  reference_length = 100,
+  monte_carlo_replicates = 1000,
+  bootstrap_replicates = 500,
+  candidates = arma_candidates(2, 2),
+  portmanteau_lag = 10,
+  confidence_level = 0.95,
+  burn_in = 1000,
+  seed = 2026
+)
+
+saveRDS(full_results, "qmm-simulation-study.rds")
+```
+
+Saving the result immediately avoids repeating a long experiment just to make
+a table or plot.
+
+```{r plot-full-study, eval=FALSE}
+ggplot2::ggplot(
+  full_results,
+  ggplot2::aes(x = horizon, y = estimate, color = scenario, group = scenario)
+) +
+  ggplot2::geom_hline(yintercept = 0.05, linetype = "dashed") +
+  ggplot2::geom_errorbar(
+    ggplot2::aes(ymin = lower, ymax = upper),
+    width = 1,
+    alpha = 0.5
+  ) +
+  ggplot2::geom_line() +
+  ggplot2::geom_point() +
+  ggplot2::facet_wrap(~quantity) +
+  ggplot2::labs(
+    x = "Phase II horizon",
+    y = "Estimated signal probability",
+    color = "Phase II scenario"
+  ) +
+  ggplot2::theme_minimal(base_size = 12)
+```
+
+The horizontal 0.05 line is most directly relevant to the unchanged panel,
+where it is the nominal pointwise false-alarm probability.
+
+## Why the numbers can differ from the original notebook
+
+The experiment design is the same, but the feasible package bootstrap does not
+use the true simulated Phase I innovations. Those innovations are available to
+the simulation author but are unobserved in a real application. Instead, each
+package bootstrap replicate uses the finite residual history estimated by its
+sampled Phase I candidate model.
+
+This deliberate change makes the public procedure applicable to an observed
+series. It also means the resulting control limits and signal proportions need
+not be numerically identical to those produced by the original oracle-style
+prototype.
+
+The package also rejects nonstationary or noninvertible bootstrap coefficient
+draws, whereas the original notebook did not explicitly reject them. In
+addition, the original `forecast::Arima()` fit and the package's
+`stats::arima()` fit report different innovation-variance estimates despite
+agreement in coefficients, likelihood, AICc, weights, covariance matrices,
+and residuals. Comparisons between implementations should introduce these
+changes one at a time before comparing operating characteristics.
+
+## References

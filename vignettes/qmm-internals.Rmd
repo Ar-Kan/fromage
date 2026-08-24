@@ -1,0 +1,290 @@
+---
+title: "How the QMM Implementation Works"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{How the QMM Implementation Works}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+This vignette explains how `fromage` implements the QMM methodology without
+requiring you to read the source code. It complements the statistical
+explanation in `vignette("qmm-chart", package = "fromage")`.
+
+The package distinguishes between two kinds of functions:
+
+- **Public functions**, such as `fit_qmm()` and `monitor_qmm()`, form the user
+  interface and are intended to remain stable.
+- **Internal helpers** perform one implementation task each. They are
+  documented for transparency but are not exported and may change between
+  package versions.
+
+An internal help page can be opened by its exact name:
+
+```r
+help("bootstrap_qmm_once", package = "fromage")
+```
+
+## Complete call path
+
+The one-call workflow follows this sequence:
+
+1. `qmm_chart()` separates the input series into Phase I and Phase II.
+2. `fit_qmm()` fits and weights the candidate ARMA models using Phase I.
+3. `calibrate_qmm()` estimates a pointwise upper control limit for each
+   requested Phase II horizon.
+4. `monitor_qmm()` constructs each observed coupled window, calculates its QMM
+   statistic, and compares it with the corresponding limit.
+5. `print()`, `summary()`, `plot()`, `signals()`, and `update()` present or
+   extend the result.
+
+The explicit three-step workflow calls steps 2--4 directly. It produces the
+same object as the corresponding parts of `qmm_chart()` and makes the
+intermediate results available for inspection.
+
+## Returned objects
+
+### `qmm_fit`
+
+`fit_qmm()` returns a `qmm_fit` list with these components:
+
+- `reference`: the validated Phase I observations.
+- `candidates`: one row per requested ARMA order. It records fitting status,
+  warnings or errors, log-likelihood, parameter count, AIC, AICc, BIC,
+  information-criterion difference, normalized weight, and whether the model
+  was retained.
+- `models`: fitted `stats::arima` objects in the same order as `candidates`.
+  A failed candidate has `NULL` in the corresponding position.
+- `criterion`, `delta_max`, and `fit_method`: the settings used in the fit.
+- `call`: the matched R call.
+
+Only successfully fitted candidates with a finite selected criterion and a
+difference no larger than `delta_max` receive positive weight.
+
+### `qmm_calibration`
+
+`calibrate_qmm()` returns a `qmm_calibration` list containing:
+
+- `fit`: the unchanged `qmm_fit` object.
+- `limits`: one pointwise upper control limit per requested horizon.
+- `bootstrap`: the bootstrap QMM statistics, or `NULL` when
+  `keep_bootstrap = FALSE`.
+- `diagnostics`: the mean number of coefficient draws and total rejected draws
+  at each horizon.
+- `selected_models`: candidate-row indices sampled during the bootstrap, or
+  `NULL` when bootstrap details are not retained.
+- The bootstrap count, confidence level, Ljung-Box lag, optional seed, and
+  matched call.
+
+The confidence level is pointwise. For example, a 0.95 limit targets a 0.05
+false-alarm probability at one specified horizon under the fitted in-control
+model. It is not a simultaneous guarantee for the entire monitoring run.
+
+### `qmm_monitor`
+
+`monitor_qmm()` and `qmm_chart()` return a `qmm_monitor` list containing:
+
+- `calibration`: the calibration used for every comparison.
+- `new_data`: Phase II observations in arrival order.
+- `results`: the observation, QMM statistic, upper control limit, and signal
+  indicator at every horizon.
+- `series`: Phase I and Phase II joined in their original order.
+- `reference_length`: the number of Phase I observations.
+- `call`: the matched R call.
+
+`update()` creates a new monitoring object from all accumulated Phase II data.
+It reuses the stored calibration; it does not refit models or rerun the
+bootstrap.
+
+## Internal function catalog
+
+The following are all named, unexported helpers in the package namespace.
+
+| Internal function | Responsibility |
+|---|---|
+| `validate_numeric_series()` | Accept one finite univariate numeric series and reject unsupported inputs. |
+| `validate_whole_number()` | Validate counts, orders, horizons, lags, and seeds before integer conversion. |
+| `validate_probability()` | Require one finite probability strictly between zero and one. |
+| `validate_qmm_fit()` | Require an object created by `fit_qmm()`. |
+| `validate_qmm_calibration()` | Require an object created by `calibrate_qmm()`. |
+| `with_seed()` | Make one operation reproducible without changing the caller's random-number state. |
+| `capture_warnings()` | Preserve candidate-fit warnings as data while keeping the fitting loop quiet. |
+| `arma_is_admissible()` | Check AR stationarity and MA invertibility through polynomial roots. |
+| `validate_coefficients()` | Check coefficient names and place AR and MA coefficients in a fixed order. |
+| `validate_candidates()` | Check and normalize the candidate ARMA-order table. |
+| `fixed_arma_residuals()` | Filter a window with Phase I coefficients held fixed. |
+| `qmm_components()` | Calculate one Ljung-Box statistic per retained candidate. |
+| `draw_arma_coefficients()` | Draw stationary and invertible coefficients for the bootstrap. |
+| `simulate_arma_continuation()` | Continue an ARMA recursion conditional on observed and residual histories. |
+| `bootstrap_qmm_once()` | Produce one complete bootstrap QMM statistic. |
+
+The short callback functions defined inside a caller, such as the function
+passed to `vapply()`, are local expressions rather than package-namespace
+helpers. Their behavior is described with the caller that uses them.
+
+## Validation helpers
+
+### `validate_numeric_series()`
+
+This helper accepts a numeric vector or a one-column `ts` object. It converts
+the result to a plain numeric vector after checking the minimum length and
+confirming there are no missing, infinite, or `NaN` values. A matrix or a
+multivariate time series is rejected because QMM presently operates on one
+series.
+
+### `validate_whole_number()`
+
+Counts and indices must be finite scalar whole numbers. The helper also checks
+a caller-specific minimum and rejects values larger than R's maximum integer.
+This avoids silent `NA` values during integer conversion.
+
+### `validate_probability()`
+
+This helper accepts one finite number strictly between zero and one. It is used
+for values such as the pointwise confidence level; endpoints zero and one do
+not define the quantiles expected by the calibration workflow.
+
+### `validate_qmm_fit()` and `validate_qmm_calibration()`
+
+These two helpers check S3 inheritance before one stage consumes the output of
+another. They prevent a general list with coincidentally similar component
+names from entering the statistical workflow.
+
+### `validate_coefficients()`
+
+For order `(p, q)`, the required names are `ar1` through `arp` followed by
+`ma1` through `maq`. The helper checks that all required values are finite,
+reports missing names, drops extra values, and returns the required
+coefficients in that canonical order.
+
+### `validate_candidates()`
+
+The candidate specification must be a nonempty data frame with `p` and `q`
+columns. Both columns must contain non-negative whole numbers, and duplicate
+ARMA orders are rejected. Extra columns are removed so the fitting stage
+receives a predictable two-column object.
+
+## Random-number and diagnostic helpers
+
+### `with_seed()`
+
+When given a seed, this helper saves the caller's random-number state, sets the
+requested seed, evaluates the operation, and restores the previous state even
+when the operation fails. When the seed is `NULL`, the caller's random stream
+is used and advanced normally.
+
+This behavior makes `simulate_arma_change()` and `calibrate_qmm()` reproducible
+without unexpectedly changing later random calculations in a user's session.
+
+### `capture_warnings()`
+
+ARMA estimation can return a fitted object together with warnings. This helper
+collects the unique warning messages and muffles their immediate display. The
+fit and its warnings are then stored in the candidate table. Errors remain
+errors and are handled separately by `fit_qmm()`.
+
+## Residual and statistic helpers
+
+### `fixed_arma_residuals()`
+
+This helper filters the evaluated window with a candidate's Phase I
+coefficients fixed. It does not estimate new coefficients from the monitoring
+window. That distinction is essential: re-estimation would allow a changed
+model to adapt to Phase II and would change the statistic being monitored.
+
+For ARMA(0,0), the observations themselves are returned as residuals. Although
+the default candidate grid excludes this model, the internal behavior remains
+defined when a user explicitly includes it.
+
+### `qmm_components()`
+
+For each retained candidate, this helper:
+
+1. obtains fixed-coefficient residuals;
+2. verifies that they are finite;
+3. calculates the Ljung-Box statistic at the requested lag with `fitdf = 0`;
+4. returns that statistic beside the candidate's Phase I weight.
+
+`fitdf = 0` is used because no parameters are estimated from the evaluated
+window. `qmm_statistic()` then multiplies these component statistics by their
+weights and sums them.
+
+## Bootstrap helpers
+
+### `arma_is_admissible()`
+
+This helper forms the autoregressive and moving-average characteristic
+polynomials and calculates their roots. The autoregressive coefficients are
+accepted as stationary and the moving-average coefficients as invertible only
+when all relevant roots lie outside the unit circle by more than a small
+tolerance.
+
+The tolerance keeps values numerically indistinguishable from the boundary
+from being accepted as safely admissible.
+
+### `draw_arma_coefficients()`
+
+The helper draws from the multivariate normal approximation whose mean is the
+fitted coefficient vector and whose covariance is the fitted covariance
+matrix. Each draw is checked by `arma_is_admissible()`. Rejected draws are
+counted, and failure to obtain an admissible draw within `max_attempts` raises
+an error instead of silently using an invalid model.
+
+The number of attempts contributes to the calibration diagnostics. Frequent
+rejection can indicate that the fitted coefficient uncertainty places
+substantial mass near or beyond the stationarity or invertibility boundary.
+
+This check is a material difference from the original notebook, which did not
+explicitly reject nonstationary or noninvertible bootstrap draws. Its effect
+should be measured separately from replacing true simulated innovations with
+fitted residuals and from changing the innovation-variance convention.
+
+### `simulate_arma_continuation()`
+
+This helper generates new Gaussian innovations and applies the fixed ARMA
+recursion one observation at a time. The Phase I series provides the initial
+observation history. The selected model's finite Phase I residuals provide the
+innovation history required by moving-average terms.
+
+Each newly simulated observation and innovation is appended to its history
+before the next value is generated. Only the new observations are returned.
+
+### `bootstrap_qmm_once()`
+
+One bootstrap replicate proceeds as follows:
+
+1. Sample one retained candidate using its normalized Phase I weight.
+2. Draw admissible coefficients with `draw_arma_coefficients()`.
+3. Simulate an in-control continuation of length `horizon`.
+4. Replace the first `horizon` observations of the fixed-length Phase I window
+   with that continuation.
+5. Calculate the QMM statistic using all retained candidates and their fixed
+   Phase I weights.
+
+The returned values are the simulated QMM statistic, the number of coefficient
+draw attempts, and the row number of the sampled candidate. `calibrate_qmm()`
+repeats this helper and uses the requested empirical quantile as the upper
+control limit.
+
+## S3 support functions
+
+The methods below are registered implementations of familiar R generics:
+
+- `print.qmm_fit()`, `print.qmm_calibration()`, and `print.qmm_monitor()` show
+  concise object summaries.
+- `summary.qmm_fit()` returns the full candidate table.
+- `summary.qmm_calibration()` joins limits and bootstrap diagnostics.
+- `summary.qmm_monitor()` returns the horizon-by-horizon monitoring table.
+- `plot.qmm_monitor()` draws the Phase II QMM statistic, the complete Phase
+  I/Phase II series, or an aligned overview containing both panels. The
+  overview deliberately leaves the Phase I statistic region empty.
+- `signals.qmm_monitor()` returns only rows whose statistic exceeds its limit.
+- `update.qmm_monitor()` appends Phase II observations and re-evaluates all
+  accumulated monitoring horizons with the stored calibration.
+
+These methods should normally be called through `print()`, `summary()`,
+`plot()`, `signals()`, and `update()` rather than by their full method names.

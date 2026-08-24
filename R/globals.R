@@ -1,1 +1,10 @@
-utils::globalVariables(c("Lag", "Poder", "modelo", "LI", "LS"))
+utils::globalVariables(c(
+  "control_limit",
+  "horizon",
+  "label",
+  "panel",
+  "signal",
+  "statistic",
+  "time",
+  "value"
+))

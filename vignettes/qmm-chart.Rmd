@@ -1,0 +1,361 @@
+---
+title: "Monitoring One Series with the Multimodel Q Chart"
+output: rmarkdown::html_vignette
+bibliography: references.bib
+link-citations: true
+vignette: >
+  %\VignetteIndexEntry{Monitoring One Series with the Multimodel Q Chart}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+This vignette explains the QMM method implemented by `fromage`. It assumes
+basic knowledge of R, autocorrelation, and ARMA models.
+
+## The monitoring problem
+
+We observe one temporal series. Its first $T$ observations form the
+**reference sample (Phase I)**: observations collected while the process is
+believed to be in control. Later observations form the **monitoring period
+(Phase II)** and are checked in their arrival order.
+
+The method is intended to detect changes in serial dependence. A signal means
+that the residual autocorrelation in the current monitoring window is unusually
+large compared with bootstrap series generated from the reference sample. A
+signal does not identify the physical cause of the change.
+
+Autocorrelation is relevant whenever observations are collected in time order
+and nearby measurements are related. An autocorrelation plot is a standard way
+to inspect that relationship [@nistAutocorrelation]. QMM goes further by
+monitoring whether the fitted dependence structure remains adequate.
+
+## A simulated process-monitoring case
+
+Suppose a sensor records one measurement from a continuous process every
+minute. Engineers have centered the measurements at the process target and
+scaled them, so zero means "on target." Consecutive values remain correlated
+because the process and its controller have memory.
+
+We simulate 100 reference observations. The controller is then changed, after
+which 40 new observations are collected. The change increases the ARMA
+coefficients from `(0.4, 0.3)` to `(0.8, 0.7)`. It does not deliberately add a
+mean shift. This is a realistic *scenario*, not a real dataset: knowing the
+data-generating mechanism lets us demonstrate whether the chart responds to a
+change in serial dependence.
+
+```{r simulate}
+library(fromage)
+
+simulated <- simulate_arma_change(
+  reference_length = 100,
+  monitoring_length = 40,
+  reference_coefficients = c(ar1 = 0.4, ma1 = 0.3),
+  monitoring_coefficients = c(ar1 = 0.8, ma1 = 0.7),
+  order = c(1, 1),
+  burn_in = 1000,
+  seed = 2026
+)
+
+plot(
+  simulated$series,
+  type = "l",
+  xlab = "Observation number",
+  ylab = "Standardized deviation from target",
+  main = "Simulated process sensor"
+)
+abline(v = 100.5, lty = 2, col = "grey40")
+legend(
+  "topleft",
+  legend = c("Observed series", "Start of Phase II"),
+  lty = c(1, 2),
+  col = c("black", "grey40"),
+  bty = "n"
+)
+```
+
+The package receives only the observed series and the Phase I boundary. It
+does not receive the true simulation coefficients or innovations.
+
+## Step 1: specify candidate ARMA models
+
+It is often uncertain which ARMA order adequately describes a short reference
+sample. The method therefore fits a set of candidate models instead of selecting
+one model and ignoring the others.
+
+```{r candidates}
+candidates <- arma_candidates(max_p = 1, max_q = 1)
+candidates
+```
+
+This convenience grid contains ARMA(1,0), ARMA(0,1), and ARMA(1,1). In a real
+study, the candidate set should be chosen using knowledge about the process and
+the purpose of the analysis. Here the short-memory set is reasonable because
+each model uses at most one autoregressive term and one moving-average term,
+and it includes the ARMA(1,1) mechanism used to generate the example. It is not
+automatically better to fit every model the computer can handle
+[@burnham2002].
+
+## Step 2: fit and weight the models
+
+For candidate model $m$, let $IC_m$ be its information-criterion value. The
+difference from the best value in the candidate set is
+
+$$
+\Delta_m = IC_m - \min_j IC_j.
+$$
+
+The normalized weight is
+
+$$
+w_m = \frac{\exp(-\Delta_m/2)}
+{\sum_j \exp(-\Delta_j/2)}.
+$$
+
+These weights describe relative support within this candidate set and for this
+reference sample. They are not permanent probabilities that a model is true.
+AICc is the default because it adds a finite-sample correction to AIC
+[@hurvich1989; @burnham2004].
+
+```{r fit}
+fit <- fit_qmm(simulated$reference, candidates)
+fit
+```
+
+Every candidate remains visible in `summary(fit)`, including a model that
+failed or was excluded. The weights of the included models sum to one.
+
+```{r fit-details}
+summary(fit)[, c("model", "AICc", "delta", "weight", "included")]
+```
+
+In this realization, ARMA(1,0) and ARMA(1,1) both receive substantial support.
+The method preserves that uncertainty instead of acting as though one selected
+order were certainly correct.
+
+## Step 3: calculate the multimodel Q statistic
+
+For each retained model, the package filters the current window while keeping
+the reference-sample coefficients fixed. It calculates the Ljung-Box statistic
+$Q_m(L)$ from that model's residuals [@ljung1978]. The multimodel statistic at
+horizon $L$ is
+
+$$
+Q_{MM}(L) = \sum_m w_m Q_m(L).
+$$
+
+The package does not use the usual chi-squared approximation to decide whether
+this weighted statistic is large. It estimates a reference distribution by
+parametric bootstrap.
+
+## Step 4: calibrate the control limits
+
+For each requested horizon $L$, one bootstrap replicate does the following:
+
+1. Samples one candidate model using its weight $w_m$.
+2. Draws stationary and invertible ARMA coefficients using the fitted
+   coefficient covariance matrix.
+3. Simulates $L$ in-control observations conditional on the reference history.
+4. Joins the final $T-L$ reference observations to those $L$ simulated
+   observations, keeping the window length equal to $T$.
+5. Calculates $Q_{MM}(L)$ for that window.
+
+The upper control limit is the selected quantile of the bootstrap statistics.
+For example, `confidence_level = 0.95` uses the 95th percentile.
+
+```{r calibrate}
+calibration <- calibrate_qmm(
+  fit,
+  horizons = seq_along(simulated$monitoring),
+  bootstrap_replicates = 99,
+  confidence_level = 0.95,
+  portmanteau_lag = 10,
+  seed = 99
+)
+
+calibration_summary <- summary(calibration)
+head(calibration_summary)
+tail(calibration_summary, 3)
+```
+
+The diagnostic columns report the coefficient draws needed to obtain the 99
+admissible bootstrap replicates at each horizon. Rejected draws are expected
+when a sampled coefficient vector is nonstationary or noninvertible; unusually
+many attempts deserve investigation.
+
+Ninety-nine replicates keep this rendered vignette reasonably fast. They do
+not make the estimated 95th percentiles precise enough for every application.
+For an analysis used to make decisions, increase the number of replicates and
+check whether the upper limits are sufficiently stable for the intended use.
+
+## Step 5: monitor the new observations
+
+At horizon $L$, the observed window contains the final $T-L$ reference
+observations and the first $L$ new observations. A signal occurs when the
+observed statistic is greater than its horizon-specific control limit.
+
+```{r monitor}
+monitoring <- monitor_qmm(calibration, simulated$monitoring)
+monitoring
+
+alerts <- signals(monitoring)
+head(alerts, 8)
+tail(alerts, 5)
+```
+
+The first signal in this fixed simulation occurs at Phase II horizon 4. Later
+signals form a sustained cluster as observations from the changed process
+replace more of the reference window. A single signal should trigger process
+investigation; it does not prove that the controller change is the cause.
+
+```{r plot, fig.width=7, fig.height=4.5}
+plot(monitoring)
+```
+
+The dashed line is the control limit. Red points, if present, are signals.
+
+For a `qcc`-style overview, align the complete series and the monitoring chart
+on one time axis:
+
+```{r overview-plot, fig.width=7, fig.height=6}
+plot(monitoring, type = "overview")
+```
+
+The upper panel contains observations from Phase I and Phase II. The lower
+panel contains the QMM statistic and its pointwise upper limits in Phase II.
+Its shaded Phase I region has no retrospective QMM points because those
+observations are used to fit and calibrate the method, not monitored against a
+limit estimated from themselves.
+
+### Add observations one at a time
+
+A real application may receive one observation at a time. Calibrate the
+planned horizons once, monitor the first new value, and then update the result.
+
+```{r sequential}
+live <- NULL
+online_alerts <- list()
+
+for (observation in simulated$monitoring) {
+  live <- if (is.null(live)) {
+    monitor_qmm(calibration, observation)
+  } else {
+    update(live, new_data = observation)
+  }
+
+  latest <- tail(summary(live), 1)
+
+  if (latest$signal) {
+    online_alerts[[length(online_alerts) + 1L]] <- latest
+  }
+}
+
+online_alerts <- do.call(rbind, online_alerts)
+row.names(online_alerts) <- NULL
+
+head(online_alerts)
+isTRUE(all.equal(online_alerts, alerts, check.attributes = FALSE))
+```
+
+`update()` uses the next limit already stored in `calibration`; it does not
+refit the reference models or rerun the bootstrap. The calibration must
+therefore contain every horizon that will be monitored. The final comparison
+is `TRUE`: processing the observations one at a time produces the same alerts
+as processing the complete Phase II vector.
+
+## The one-call version
+
+When one vector already contains both periods, `qmm_chart()` performs the same
+three steps. `reference_length` specifies where monitoring begins.
+
+```{r one-call, eval=FALSE}
+chart <- qmm_chart(
+  simulated$series,
+  reference_length = 100,
+  candidates = candidates,
+  bootstrap_replicates = 199,
+  portmanteau_lag = 10,
+  seed = 99
+)
+
+chart
+signals(chart)
+plot(chart, type = "overview")
+```
+
+This block is not run while building the vignette because it repeats the fit
+and bootstrap already demonstrated above. The larger bootstrap count is still
+an example setting, not a universal requirement.
+
+## Applying the workflow to your series
+
+In practice, `x` can be any numeric vector or univariate `ts` object. For
+example, after importing a CSV file whose `sensor_value` column is ordered by
+collection time:
+
+```{r own-series, eval=FALSE}
+process_data <- read.csv("process-sensor.csv")
+x <- process_data$sensor_value
+
+reference_length <- 100
+
+chart <- qmm_chart(
+  x = x,
+  reference_length = reference_length,
+  candidates = arma_candidates(1, 1),
+  bootstrap_replicates = 999,
+  confidence_level = 0.95,
+  portmanteau_lag = 10,
+  seed = 2026
+)
+
+summary(chart$calibration$fit)
+signals(chart)
+plot(chart, type = "overview")
+```
+
+The initial `reference_length` observations must be a defensible in-control
+reference period. The candidate orders, portmanteau lag, bootstrap size, and
+confidence level are analysis choices; the values above illustrate the API
+rather than replacing subject-matter justification.
+
+## Difference from the original simulation prototype
+
+The original prototype passed the true simulated innovations into the
+bootstrap. True innovations are known in a simulation but are not observed in
+a real process. The public package workflow instead uses the residual history
+estimated by the candidate model selected in each bootstrap replicate.
+
+This change makes the method usable with an observed series. It can also change
+the numerical control limits. Simulation output still includes the true
+innovations so that methodological validation can compare the feasible and
+oracle versions without requiring them from package users.
+
+Two other implementation differences affect the bootstrap. The original
+prototype accepted coefficient draws without explicitly rejecting
+nonstationary or noninvertible values; the package rejects those draws. Also,
+`forecast::Arima()` in the prototype and `stats::arima()` in the package use
+different conventions for the reported innovation variance even when their
+coefficients, likelihood, AICc, weights, covariance matrices, and residuals
+agree. These changes should be evaluated separately when comparing
+implementations.
+
+## Interpretation and scope
+
+- Control limits are pointwise. Repeated monitoring changes the probability of
+  seeing at least one false alarm over a complete run.
+- The QMM construction supports horizons from 1 through $T$. It does not
+  claim an indefinitely calibrated average run length.
+- Results are conditional on the reference sample and candidate set.
+- Model-fit and bootstrap diagnostics should be inspected before interpreting
+  signals.
+
+## References
+
+For a package-based version of the original Monte Carlo experiment, see
+`vignette("qmm-simulation-study", package = "fromage")`. For a guide to every
+implementation helper and returned object, see
+`vignette("qmm-internals", package = "fromage")`.
