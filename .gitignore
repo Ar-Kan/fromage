@@ -4,3 +4,5 @@
 !.editorconfig
 results/
 validation/
+*.Rcheck/
+*.tar.gz

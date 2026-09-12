@@ -230,6 +230,32 @@ Its shaded Phase I region has no retrospective QMM points because those
 observations are used to fit and calibrate the method, not monitored against a
 limit estimated from themselves.
 
+### Inspect the bootstrap distributions behind the control limits
+
+The control limits plotted above are quantiles of the horizon-specific
+bootstrap distributions calculated in Step 4. `type = "bootstrap"` replaces
+the shaded Phase I region with a row of density panels for a handful of those
+distributions, so the reference sample's monitoring window and the bootstrap
+calibration behind it can be read from a single figure:
+
+```{r bootstrap-plot, fig.width=9, fig.height=6}
+plot(monitoring, type = "bootstrap")
+```
+
+Each density panel shows one horizon's bootstrap `qmm_statistic()` values with
+a dotted line at that horizon's control limit. By default, up to four horizons
+already reached by monitoring are chosen automatically; pass `density_horizons`
+to inspect specific ones instead, for example the first and last monitored
+horizons:
+
+```{r bootstrap-plot-chosen, fig.width=9, fig.height=6}
+plot(monitoring, type = "bootstrap", density_horizons = c(1, 40))
+```
+
+`type = "bootstrap"` requires `keep_bootstrap = TRUE` in `calibrate_qmm()`
+(the default), since it needs the retained bootstrap draws rather than only
+the resulting limits.
+
 ### Add observations one at a time
 
 A real application may receive one observation at a time. Calibrate the

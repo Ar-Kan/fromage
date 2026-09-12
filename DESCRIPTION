@@ -25,6 +25,7 @@ RoxygenNote: 7.3.3
 Imports:
     ggplot2,
     mvtnorm,
+    patchwork,
     stats,
     utils
 Suggests:

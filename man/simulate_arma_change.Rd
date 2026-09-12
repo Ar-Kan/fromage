@@ -16,9 +16,9 @@ simulate_arma_change(
 )
 }
 \arguments{
-\item{reference_length}{Number of returned reference observations.}
+\item{reference_length}{Number of returned reference observations (Phase I).}
 
-\item{monitoring_length}{Number of returned monitoring observations.}
+\item{monitoring_length}{Number of returned monitoring observations (Phase II).}
 
 \item{reference_coefficients}{Named ARMA coefficients for the reference
 segment, such as \code{c(ar1 = 0.4, ma1 = 0.3)}.}
