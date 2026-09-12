@@ -86,3 +86,92 @@ test_that("qmm_chart runs the complete single-series workflow", {
     2 * sum(chart$results$signal)
   )
 })
+
+test_that("select_density_horizons keeps every eligible horizon when four or fewer are monitored", {
+  expect_equal(
+    fromage:::select_density_horizons(c(1, 2, 3), monitored_length = 3),
+    c(1L, 2L, 3L)
+  )
+})
+
+test_that("select_density_horizons restricts the default to horizons already monitored", {
+  expect_equal(
+    fromage:::select_density_horizons(1:10, monitored_length = 4),
+    c(1L, 2L, 3L, 4L)
+  )
+})
+
+test_that("select_density_horizons picks at most four evenly spread horizons by default", {
+  picked <- fromage:::select_density_horizons(1:50, monitored_length = 50)
+  expect_length(picked, 4L)
+  expect_equal(picked, sort(unique(picked)))
+  expect_true(all(picked %in% 1:50))
+})
+
+test_that("select_density_horizons allows an explicit horizon beyond monitoring progress", {
+  expect_equal(
+    fromage:::select_density_horizons(1:50, monitored_length = 10, requested = 40),
+    40L
+  )
+})
+
+test_that("select_density_horizons rejects an explicit horizon outside the calibration", {
+  expect_error(
+    fromage:::select_density_horizons(1:10, monitored_length = 10, requested = 11),
+    "not part of the calibration"
+  )
+})
+
+test_that("plot type = 'bootstrap' requires kept bootstrap draws", {
+  simulated <- simulate_arma_change(
+    reference_length = 30,
+    monitoring_length = 3,
+    reference_coefficients = c(ar1 = 0.3),
+    monitoring_coefficients = c(ar1 = 0.6),
+    order = c(1, 0),
+    burn_in = 50,
+    seed = 40
+  )
+  chart <- qmm_chart(
+    simulated$series,
+    reference_length = 30,
+    candidates = arma_candidates(1, 0),
+    bootstrap_replicates = 3,
+    portmanteau_lag = 4,
+    seed = 41,
+    keep_bootstrap = FALSE
+  )
+
+  expect_error(plot(chart, type = "bootstrap"), "keep_bootstrap")
+})
+
+test_that("plot type = 'bootstrap' composes a density panel per selected horizon", {
+  simulated <- simulate_arma_change(
+    reference_length = 30,
+    monitoring_length = 3,
+    reference_coefficients = c(ar1 = 0.3),
+    monitoring_coefficients = c(ar1 = 0.6),
+    order = c(1, 0),
+    burn_in = 50,
+    seed = 42
+  )
+  chart <- qmm_chart(
+    simulated$series,
+    reference_length = 30,
+    candidates = arma_candidates(1, 0),
+    bootstrap_replicates = 3,
+    portmanteau_lag = 4,
+    seed = 43
+  )
+
+  bootstrap_plot <- plot(chart, type = "bootstrap")
+  expect_s3_class(bootstrap_plot, "patchwork")
+
+  chosen_plot <- plot(chart, type = "bootstrap", density_horizons = 2)
+  expect_s3_class(chosen_plot, "patchwork")
+
+  expect_error(
+    plot(chart, type = "bootstrap", density_horizons = 99),
+    "not part of the calibration"
+  )
+})

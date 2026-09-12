@@ -4,19 +4,33 @@
 \alias{plot.qmm_monitor}
 \title{Plot a multimodel Q monitoring result}
 \usage{
-\method{plot}{qmm_monitor}(x, type = c("statistic", "series", "overview"), ...)
+\method{plot}{qmm_monitor}(
+  x,
+  type = c("statistic", "series", "overview", "bootstrap"),
+  density_horizons = NULL,
+  ...
+)
 }
 \arguments{
 \item{x}{A monitoring result created by \code{\link[=monitor_qmm]{monitor_qmm()}} or \code{\link[=qmm_chart]{qmm_chart()}}.}
 
 \item{type}{Plot the Phase II QMM statistic and control limit
-(\code{"statistic"}), the complete Phase I/Phase II series (\code{"series"}), or an
-aligned two-panel view containing both (\code{"overview"}).}
+(\code{"statistic"}), the complete Phase I/Phase II series (\code{"series"}), an
+aligned two-panel view containing both (\code{"overview"}), or the same
+two-panel view with a row of bootstrap-statistic density panels in place
+of the Phase I region (\code{"bootstrap"}). \code{"bootstrap"} requires that \code{x}'s
+calibration was created with \code{calibrate_qmm(..., keep_bootstrap = TRUE)}.}
+
+\item{density_horizons}{For \code{type = "bootstrap"}, the horizon(s) to draw a
+density panel for. Defaults to \code{NULL}, which auto-selects at most 4
+horizons already reached by monitoring (see \code{\link[=select_density_horizons]{select_density_horizons()}}).
+An explicit value may also name a calibrated horizon beyond the current
+monitoring progress.}
 
 \item{...}{Unused.}
 }
 \value{
-A \code{ggplot} object.
+A \code{ggplot} object, or (\code{type = "bootstrap"}) a \code{patchwork} object.
 }
 \description{
 Plot a multimodel Q monitoring result
